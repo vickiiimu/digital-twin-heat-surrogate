@@ -10,4 +10,4 @@ __pycache__/
 *.npz
 .DS_Store
 .ipynb_checkpoints/
-.venv/
+.venv/.venv/

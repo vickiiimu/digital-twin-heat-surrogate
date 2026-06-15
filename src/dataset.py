@@ -83,8 +83,12 @@ class HeatDataset(Dataset):
         y = self.y[idx]
 
         if self.normalize:
-            x = (x - self.stats.x_mean.squeeze(0)) / self.stats.x_std.squeeze(0)
-            y = (y - self.stats.y_mean.squeeze(0)) / self.stats.y_std.squeeze(0)
+            x_mean = self.stats.x_mean.squeeze(0).to(x.device)
+            x_std = self.stats.x_std.squeeze(0).to(x.device)
+            y_mean = self.stats.y_mean.squeeze(0).to(y.device)
+            y_std = self.stats.y_std.squeeze(0).to(y.device)
+            x = (x - x_mean) / x_std
+            y = (y - y_mean) / y_std
 
         return {
             "x": x,

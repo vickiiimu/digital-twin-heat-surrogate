@@ -1,10 +1,13 @@
 """Train surrogate models for the synthetic 2D heat equation dataset.
 
-Local example:
+CNN local example:
     python3 src/train.py --model cnn --epochs 50 --batch-size 32
 
+FNO local example:
+    python3 src/train.py --model fno --epochs 50 --batch-size 32 --device cpu
+
 Cluster example:
-    python3 src/train.py --model cnn --epochs 100 --batch-size 64 --num-workers 4
+    python3 src/train.py --model fno --epochs 100 --batch-size 64 --num-workers 4 --device cuda
 """
 
 from __future__ import annotations
@@ -23,12 +26,12 @@ from torch import nn
 from tqdm import tqdm
 
 from dataset import NormalizationStats, make_dataloaders
-from models import HeatCNN, count_parameters
+from models import HeatCNN, HeatFNO, count_parameters
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=["cnn"], default="cnn")
+    parser.add_argument("--model", choices=["cnn", "fno"], default="cnn")
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--log-dir", type=Path, default=Path("logs"))
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
@@ -43,6 +46,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--hidden-channels", type=int, default=64)
     parser.add_argument("--depth", type=int, default=5)
+    parser.add_argument("--fno-width", type=int, default=32)
+    parser.add_argument("--fno-modes", type=int, default=12)
+    parser.add_argument("--fno-depth", type=int, default=4)
+    parser.add_argument("--fno-no-grid", action="store_true")
     parser.add_argument("--no-normalize", action="store_true")
     parser.add_argument("--no-residual-initial", action="store_true")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
@@ -72,6 +79,15 @@ def make_model(args: argparse.Namespace) -> nn.Module:
         return HeatCNN(
             hidden_channels=args.hidden_channels,
             depth=args.depth,
+            residual_initial=not args.no_residual_initial,
+        )
+    if args.model == "fno":
+        return HeatFNO(
+            width=args.fno_width,
+            modes1=args.fno_modes,
+            modes2=args.fno_modes,
+            depth=args.fno_depth,
+            use_grid=not args.fno_no_grid,
             residual_initial=not args.no_residual_initial,
         )
     raise ValueError(f"Unknown model: {args.model}")

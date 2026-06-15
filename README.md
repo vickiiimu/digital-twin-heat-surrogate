@@ -1,12 +1,10 @@
 # Uncertainty-Aware Digital Twin for 2D Heat Diffusion
 
-This project is a compact scientific machine learning pipeline for a 2D heat-diffusion system. It simulates a physical process, trains a neural surrogate, validates the surrogate against finite-difference data, calibrates an unknown physical parameter from sparse sensors, and estimates predictive uncertainty with an ensemble.
-
-I built this as a co-op application supplement for roles in scientific ML, digital twins, surrogate modeling, and uncertainty-aware modeling. The goal is not to model a full industrial thermal system, but to demonstrate the end-to-end workflow I would use on a larger physical modeling problem.
+This project is a compact scientific machine learning pipeline for a 2D heat-diffusion system. It simulates a physical process, trains neural surrogates, validates them against finite-difference data, calibrates an unknown physical parameter from sparse sensors, and estimates predictive uncertainty with an ensemble.
 
 ## Why This Project
 
-Digital twins combine simulation, data, and model updating. In a real system, a high-fidelity simulator may be accurate but too slow to run repeatedly, while sensor data may be sparse and noisy. A useful surrogate should be fast, validated against simulation, and honest about when it is less reliable.
+Digital twins combine simulation, data, and model updating. In a real system, a high-fidelity simulator may be accurate but too slow to run repeatedly, while sensor data may be sparse and noisy. A useful surrogate should be fast, validated against simulation, and explicit about when it is less reliable.
 
 This project mirrors that workflow on a controlled problem:
 
@@ -57,16 +55,19 @@ digital-twin-heat-surrogate/
   src/
     simulate.py              # finite-difference data generation
     dataset.py               # PyTorch Dataset and DataLoader utilities
-    models.py                # CNN surrogate baseline
+    models.py                # CNN and FNO surrogate models
     train.py                 # training loop, metrics, checkpoints, logs
+    train_fno.py             # convenience entry point for FNO training
     calibrate.py             # finite-difference sparse-sensor calibration
     surrogate_calibrate.py   # surrogate-vs-simulator calibration comparison
     uncertainty.py           # ensemble uncertainty estimation
   notebooks/
     01_synthetic_data_qc.ipynb
     02_run_results_analysis.ipynb
+    03_compare_models.ipynb
   scripts/
     train.slurm
+    train_fno.slurm
   figures/
   data/
   logs/
@@ -98,7 +99,7 @@ This creates `.npz` files in `data/` and a simulation preview in `figures/`.
 
 ## Data Quality Control
 
-Before training, I used `notebooks/01_synthetic_data_qc.ipynb` to check:
+Before training, `notebooks/01_synthetic_data_qc.ipynb` checks:
 
 - shapes and dtypes
 - finite values and value ranges
@@ -111,7 +112,10 @@ This step is important because bad simulation data would make any surrogate resu
 
 ## Surrogate Model
 
-The current implemented surrogate is a compact CNN baseline in `src/models.py`.
+The project includes two surrogate models in `src/models.py`:
+
+- a compact CNN baseline
+- a small Fourier Neural Operator (FNO)
 
 The model predicts the change from the initial condition:
 
@@ -119,7 +123,7 @@ The model predicts the change from the initial condition:
 u_pred(T) = u0 + learned_delta
 ```
 
-I used this residual form because heat diffusion often changes the field smoothly from the initial state. Predicting a correction is easier than reconstructing the full final temperature field from scratch.
+This residual form is useful because heat diffusion often changes the field smoothly from the initial state. Predicting a correction is easier than reconstructing the full final temperature field from scratch.
 
 Current CNN settings:
 
@@ -129,13 +133,27 @@ Current CNN settings:
 - batch normalization
 - about 113k trainable parameters
 
-This is intentionally simple. It gives me a reliable baseline before adding a Fourier Neural Operator.
+The CNN is intentionally simple and provides a reliable baseline for comparison against the FNO.
 
 Train locally with:
 
 ```bash
 python3 src/train.py --model cnn --epochs 50 --batch-size 32 --run-name cnn_local_baseline_50ep
 ```
+
+Train the FNO with:
+
+```bash
+python3 src/train_fno.py --epochs 50 --batch-size 32 --device cpu --run-name fno_local_50ep
+```
+
+On CUDA, use:
+
+```bash
+python3 src/train_fno.py --epochs 100 --batch-size 64 --device cuda --num-workers 4 --run-name fno_cuda_100ep
+```
+
+The FNO uses FFTs. If local Apple MPS has trouble with FFT/complex operations, CPU is the safest local option and CUDA is the better cluster option.
 
 The training script saves:
 
@@ -147,11 +165,18 @@ The training script saves:
 
 This makes each run reproducible and easy to inspect.
 
-## CNN Baseline Results
+## Model Results
 
-The baseline CNN was trained for 50 epochs on local Apple Silicon GPU acceleration through MPS.
+Both the CNN and FNO were trained for 50 epochs. The CNN provides a local-convolution baseline, while the FNO learns global spatial interactions through Fourier-domain layers.
 
-Best validation epoch: `44`
+| Model | Parameters | Best epoch | Test MSE | Test relative L2 | Test max abs |
+|---|---:|---:|---:|---:|---:|
+| CNN | 113,153 | 44 | 2.22e-05 | 0.0444 | 0.0256 |
+| FNO | 1,186,241 | 50 | 1.48e-06 | 0.0109 | 0.0057 |
+
+The FNO substantially improves in-distribution accuracy, reducing test relative L2 error by about 75% compared with the CNN baseline.
+
+### CNN Baseline
 
 | Split | MSE | Relative L2 | Mean max abs error |
 |---|---:|---:|---:|
@@ -160,7 +185,24 @@ Best validation epoch: `44`
 | OOD corner | 2.76e-05 | 0.0566 | 0.0341 |
 | OOD multi-heater | 4.08e-05 | 0.0489 | 0.0356 |
 
-The model generalizes well on the held-out centered-heater test set. The OOD splits have higher max absolute error and, for corner heaters, noticeably higher relative L2 error. This is the behavior I hoped to see: the surrogate is useful in distribution, but distribution shift is detectable.
+### Fourier Neural Operator
+
+| Split | MSE | Relative L2 | Mean max abs error |
+|---|---:|---:|---:|
+| Validation | 1.72e-06 | 0.0111 | 0.0058 |
+| Test | 1.48e-06 | 0.0109 | 0.0057 |
+| OOD corner | 2.26e-05 | 0.0476 | 0.0279 |
+| OOD multi-heater | 1.50e-05 | 0.0264 | 0.0200 |
+
+The FNO also improves OOD performance, though the gap between in-distribution and OOD error remains visible. This is useful for the digital twin framing: the surrogate is accurate on familiar heater configurations, but distribution shift still matters.
+
+![Model comparison training curves](figures/model_comparison_training_curves.png)
+
+![Model comparison final metrics](figures/model_comparison_final_metrics.png)
+
+![FNO relative L2 improvement](figures/model_comparison_rel_l2_improvement.png)
+
+![Model prediction comparison](figures/model_comparison_predictions.png)
 
 ![Training curves](figures/cnn_local_baseline_50ep_training_curves.png)
 
@@ -178,7 +220,7 @@ OOD examples:
 
 ## Sparse-Sensor Calibration
 
-For calibration, I pretend `alpha` is unknown. I use only sparse noisy sensor readings from the final temperature field, then search over candidate alpha values.
+For calibration, `alpha` is treated as unknown. The calibration routine uses only sparse noisy sensor readings from the final temperature field, then searches over candidate alpha values.
 
 The finite-difference calibration procedure is:
 
@@ -209,7 +251,7 @@ This is the digital twin update step: sparse observations are used to infer a hi
 
 ## Surrogate-Based Calibration
 
-I also compared finite-difference calibration to surrogate calibration. The two methods use the same sensor locations and noisy observations.
+Finite-difference calibration is also compared to surrogate calibration. The two methods use the same sensor locations and noisy observations.
 
 The surrogate method does not rerun the PDE solver. Instead, for each candidate alpha, it changes the alpha input channel and evaluates the trained CNN.
 
@@ -233,11 +275,11 @@ Result:
 
 ![Surrogate calibration comparison](figures/surrogate_calibration_comparison.png)
 
-The surrogate calibration recovered alpha slightly closer to the true value on this sample. I would not over-interpret one example, but the result demonstrates the intended workflow: once trained, a surrogate can be used inside a parameter search loop as a fast approximation to repeated simulation calls.
+The surrogate calibration recovered alpha slightly closer to the true value on this sample. This single example is not a full calibration benchmark, but it demonstrates the intended workflow: once trained, a surrogate can be used inside a parameter search loop as a fast approximation to repeated simulation calls.
 
 ## Ensemble Uncertainty
 
-To estimate predictive uncertainty, I trained three CNN models with different random seeds:
+Predictive uncertainty is estimated using three CNN models trained with different random seeds:
 
 ```bash
 python3 src/train.py --epochs 30 --batch_size 32 --seed 0 --run-name cnn_ensemble_seed0
@@ -245,7 +287,7 @@ python3 src/train.py --epochs 30 --batch_size 32 --seed 1 --run-name cnn_ensembl
 python3 src/train.py --epochs 30 --batch_size 32 --seed 2 --run-name cnn_ensemble_seed2
 ```
 
-Then I loaded all three checkpoints and computed:
+The script loads all three checkpoints and computes:
 
 ```text
 prediction_mean = average model prediction
@@ -279,7 +321,7 @@ The repository includes a starter Slurm script:
 sbatch scripts/train.slurm
 ```
 
-My intended workflow is:
+The intended cluster workflow is:
 
 1. Develop and debug locally.
 2. Push code to GitHub.
@@ -290,9 +332,9 @@ My intended workflow is:
 
 The training script is command-line driven so the same code can run locally or on the cluster.
 
-## What I Learned
+## Technical Scope
 
-This project helped me practice the pieces that show up repeatedly in scientific ML work:
+The project covers the core components of a small scientific ML workflow:
 
 - turning a PDE into a supervised operator-learning dataset
 - checking synthetic data before training
@@ -303,11 +345,11 @@ This project helped me practice the pieces that show up repeatedly in scientific
 - calibrating an unknown physical parameter from sparse sensors
 - using ensembles to estimate uncertainty
 
-The most important lesson is that the model is only one part of the system. The surrounding workflow -- simulation, validation, calibration, uncertainty, and reliability testing -- is what makes the project feel like a digital twin rather than just an image-to-image regression task.
+The model is only one part of the system. The surrounding workflow -- simulation, validation, calibration, uncertainty, and reliability testing -- is what makes the project a digital twin workflow rather than only an image-to-image regression task.
 
 ## Current Limitations
 
-- The current implemented surrogate is a CNN baseline, not yet an FNO.
+- The FNO is trained on a small synthetic dataset; larger training sets would be needed for a stronger operator-learning benchmark.
 - The simulator is intentionally simple: fixed grid, simple heaters, and constant alpha per sample.
 - Calibration is demonstrated on a single sample; a stronger study would report statistics over many samples and sensor layouts.
 - Ensemble uncertainty captures model disagreement, but not all sources of physical or observational uncertainty.
@@ -315,16 +357,13 @@ The most important lesson is that the model is only one part of the system. The 
 
 ## Next Steps
 
-The next major upgrade is to implement a Fourier Neural Operator and compare it directly against the CNN baseline. That would make the project more aligned with operator learning and surrogate modeling roles.
+Possible extensions:
 
-Planned extensions:
-
-- add FNO model in `src/models.py`
-- train CNN and FNO under the same data splits
-- compare CNN vs FNO on test and OOD sets
+- train on larger grids and evaluate resolution transfer
+- add multi-step rollout prediction instead of only final-time prediction
 - run calibration over many random samples
 - report uncertainty-error correlation on OOD examples
-- polish figures for a final application-ready README
+- improve figure styling for publication-quality presentation
 
 ## Reproducing the Main Results
 
@@ -346,10 +385,22 @@ Train CNN baseline:
 python3 src/train.py --model cnn --epochs 50 --batch-size 32 --run-name cnn_local_baseline_50ep
 ```
 
+Train FNO:
+
+```bash
+python3 src/train_fno.py --epochs 50 --batch-size 32 --run-name fno_local_50ep
+```
+
 Analyze the run:
 
 ```bash
 jupyter notebook notebooks/02_run_results_analysis.ipynb
+```
+
+Compare CNN and FNO:
+
+```bash
+jupyter notebook notebooks/03_compare_models.ipynb
 ```
 
 Run finite-difference calibration:
